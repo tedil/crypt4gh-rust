@@ -21,14 +21,16 @@
     clippy::redundant_else
 )]
 
+use rand::{Rng, RngCore, SeedableRng};
+use rand_chacha;
+
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
 
+use header::DecryptedHeaderPackets;
+
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{self, ChaCha20Poly1305, Key, KeyInit, Nonce};
-use header::DecryptedHeaderPackets;
-use rand::{Rng, RngCore, SeedableRng};
-use rand_chacha;
 
 use crate::error::Crypt4GHError;
 
@@ -148,9 +150,7 @@ pub fn encrypt<R: Read, W: Write>(
 
     let mut segment = [0_u8; SEGMENT_SIZE];
 
-    let mut rnd = rand_chacha::ChaCha20Rng::from_entropy();
-    let mut nonce_bytes = [0u8; 12];
-    rnd.fill(&mut nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&session_key));
 
     // The whole file
     match range_span {
@@ -160,18 +160,11 @@ pub fn encrypt<R: Read, W: Write>(
                 break;
             } else if segment_len < SEGMENT_SIZE {
                 let (data, _) = segment.split_at(segment_len);
-                let nonce = Nonce::from_slice(&nonce_bytes);
-                //.map_err(|_| Crypt4GHError::NoRandomNonce)?;
-                let key = Key::from_slice(&session_key);
-                //.ok_or(Crypt4GHError::NoKey)?;
-                let encrypted_data = encrypt_segment(data, *nonce, &key)?;
+                let encrypted_data = encrypt_segment(data, &cipher, &mut rnd)?;
                 write_buffer.write_all(&encrypted_data)?;
                 break;
             } else {
-                let nonce = Nonce::from_slice(&nonce_bytes);
-                //.ok_or(Crypt4GHError::NoRandomNonce)?;
-                let key = Key::from_slice(&session_key); //.ok_or(Crypt4GHError::NoKey)?;
-                let encrypted_data = encrypt_segment(&segment, *nonce, &key)?;
+                let encrypted_data = encrypt_segment(&segment, &cipher, &mut rnd)?;
                 write_buffer.write_all(&encrypted_data)?;
             }
         },
@@ -182,11 +175,7 @@ pub fn encrypt<R: Read, W: Write>(
                 // Stop
                 if segment_len >= remaining_length {
                     let (data, _) = segment.split_at(remaining_length);
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    //.ok_or(Crypt4GHError::NoRandomNonce)?;
-                    let key = Key::from_slice(&session_key);
-                    //.ok_or(Crypt4GHError::NoKey)?;
-                    let encrypted_data = encrypt_segment(data, *nonce, &key)?;
+                    let encrypted_data = encrypt_segment(data, &cipher, &mut rnd)?;
                     write_buffer.write_all(&encrypted_data)?;
                     break;
                 }
@@ -194,20 +183,12 @@ pub fn encrypt<R: Read, W: Write>(
                 // Not a full segment
                 if segment_len < SEGMENT_SIZE {
                     let (data, _) = segment.split_at(segment_len);
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    //.ok_or(Crypt4GHError::NoRandomNonce)?;
-                    let key = Key::from_slice(&session_key);
-                    //.ok_or(Crypt4GHError::NoKey)?;
-                    let encrypted_data = encrypt_segment(data, *nonce, &key)?;
+                    let encrypted_data = encrypt_segment(data, &cipher, &mut rnd)?;
                     write_buffer.write_all(&encrypted_data)?;
                     break;
                 }
 
-                let nonce = Nonce::from_slice(&nonce_bytes);
-                //.ok_or(Crypt4GHError::NoRandomNonce)?;
-                let key = Key::from_slice(&session_key);
-                //.ok_or(Crypt4GHError::NoKey)?;
-                let encrypted_data = encrypt_segment(&segment, *nonce, &key)?;
+                let encrypted_data = encrypt_segment(&segment, &cipher, &mut rnd)?;
                 write_buffer.write_all(&encrypted_data)?;
 
                 remaining_length -= segment_len;
@@ -250,12 +231,21 @@ pub fn encrypt_header(
 /// Encrypts a segment.
 ///
 /// Returns [ nonce + `encrypted_data` ].
-pub fn encrypt_segment(data: &[u8], nonce: Nonce, key: &Key) -> Result<Vec<u8>, Crypt4GHError> {
-    let cipher = ChaCha20Poly1305::new(key);
+pub fn encrypt_segment(
+    data: &[u8],
+    cipher: &ChaCha20Poly1305,
+    rnd: &mut impl Rng,
+) -> Result<Vec<u8>, Crypt4GHError> {
+    let mut nonce_bytes = [0u8; 12];
+    rnd.fill(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(&nonce, data)
+        .encrypt(nonce, data)
         .map_err(|_| Crypt4GHError::NoSupportedEncryptionMethod)?;
-    Ok(vec![nonce.to_vec(), ciphertext].concat())
+    let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
 }
 
 /// Reads from the `read_buffer` and writes the decrypted data to `write_buffer`.
@@ -752,9 +742,8 @@ pub fn rearrange<R: Read, W: Write>(
                 if keep_segment {
                     write_buffer.write_all(&buf[0..n])?;
                 }
-            }
-            // Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
-            // Err(e) => return Err(Crypt4GHError::ReadRemainderError(e.into())),
+            } // Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
+              // Err(e) => return Err(Crypt4GHError::ReadRemainderError(e.into())),
         }
     }
 
