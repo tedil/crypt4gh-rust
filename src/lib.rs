@@ -754,9 +754,8 @@ pub fn rearrange<R: Read, W: Write>(
                 if keep_segment {
                     write_buffer.write_all(&buf[0..n])?;
                 }
-            }
-            // Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
-            // Err(e) => return Err(Crypt4GHError::ReadRemainderError(e.into())),
+            } // Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
+              // Err(e) => return Err(Crypt4GHError::ReadRemainderError(e.into())),
         }
     }
 
